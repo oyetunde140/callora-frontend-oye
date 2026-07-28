@@ -1,3 +1,4 @@
+import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import EmptyState from "../components/EmptyState";
 import PlanBadgeComponent, { type PlanTier } from "../components/PlanBadge";
@@ -16,6 +17,7 @@ import useDocumentTitle from "../hooks/useDocumentTitle";
  * - Focus indicators inherit the global `--accent` focus ring from focus.css.
  * - The EmptyState illustration is aria-hidden; meaning comes from the
  *   heading + paragraph below it.
+ * - Error messages use aria-live="polite" for announcement.
  *
  * Design-token consistency:
  * - All colors reference CSS custom properties; no hardcoded hex values.
@@ -26,6 +28,15 @@ import useDocumentTitle from "../hooks/useDocumentTitle";
  * - The tier picker stacks to a single column below 480 px via flex-wrap.
  * - The page padding scales with `clamp()` so it feels comfortable at every
  *   breakpoint without explicit @media queries.
+ *
+ * Optimistic UI (#697):
+ * - The "Choose a plan" primary CTA opens an inline tier picker instead of
+ *   immediately navigating to /billing.
+ * - Selecting a tier immediately updates the UI (optimistic update) and
+ *   triggers an async save call.
+ * - If the save fails the tier reverts to the previous selection and an
+ *   error message is shown.
+ * - A saving indicator is shown on the active tier while saving.
  */
 
 /** The three plan tiers exposed by PlanBadge. */
@@ -37,7 +48,27 @@ const TIER_LABELS: Record<PlanTier, string> = {
   enterprise: "Enterprise",
 };
 
-export default function PlanBadgePage() {
+/**
+ * Default simulated API: saves the selected plan tier.
+ * Replace with a real API call when backend integration is ready.
+ */
+async function defaultSavePlanTier(_tier: PlanTier): Promise<void> {
+  // TODO(#697): Replace with actual API call:
+  //   await fetch("/api/plan", { method: "PUT", body: JSON.stringify({ tier }) })
+  await new Promise((resolve) => setTimeout(resolve, 600));
+}
+
+export type PlanBadgePageProps = {
+  /**
+   * Optional save function, injected for testing.
+   * Defaults to a simulated 600 ms delay.
+   */
+  onSavePlanTier?: (tier: PlanTier) => Promise<void>;
+};
+
+export default function PlanBadgePage({
+  onSavePlanTier = defaultSavePlanTier,
+}: PlanBadgePageProps = {}) {
   const navigate = useNavigate();
 
   useDocumentTitle(
@@ -45,14 +76,61 @@ export default function PlanBadgePage() {
     "Preview and assign a plan tier badge to your API on the Callora marketplace."
   );
 
-  // In this phase no real plan data is available yet, so we always land on
-  // the empty state.  Once backend data arrives, replace `selectedTier` with
-  // a data-fetching hook and conditionally render the picker or the badge.
-  const selectedTier: PlanTier | null = null;
+  // ── State ──────────────────────────────────────────────────────────────
 
-  // Navigate to billing to start the upgrade flow.
-  const handleChoosePlan = () => navigate("/billing");
+  /** Whether the inline tier picker is visible (opened by "Choose a plan"). */
+  const [showTierPicker, setShowTierPicker] = useState(false);
+
+  /** The tier currently shown in the badge preview (updated optimistically). */
+  const [selectedTier, setSelectedTier] = useState<PlanTier | null>(null);
+
+  /** Whether a save operation is in flight. */
+  const [saving, setSaving] = useState(false);
+
+  /** Error message shown when a save attempt fails. */
+  const [error, setError] = useState<string | null>(null);
+
+  // ── Handlers ───────────────────────────────────────────────────────────
+
+  /**
+   * Opens the inline tier picker (primary action of the page).
+   * This is the optimistic UI trigger point — instead of navigating away
+   * to /billing, the user can pick a tier inline.
+   */
+  const handleChoosePlan = () => {
+    setShowTierPicker(true);
+  };
+
+  /**
+   * Optimistic tier selection:
+   * 1. Immediately update the visible tier.
+   * 2. Fire the async save.
+   * 3. On failure, revert to the previous tier and show an error.
+   */
+  const handleTierChange = useCallback(
+    async (nextTier: PlanTier) => {
+      const prev = selectedTier; // Capture immediately — avoids stale closure.
+      setError(null);
+      setSelectedTier(nextTier);
+      setSaving(true);
+
+      try {
+        await onSavePlanTier(nextTier);
+      } catch {
+        setSelectedTier(prev);
+        setError(
+          `Failed to save "${TIER_LABELS[nextTier]}" plan. Please try again.`
+        );
+      } finally {
+        setSaving(false);
+      }
+    },
+    [selectedTier, onSavePlanTier]
+  );
+
   const handleLearnMore = () => navigate("/marketplace");
+
+  // ── Render ─────────────────────────────────────────────────────────────
 
   return (
     <div
@@ -86,11 +164,57 @@ export default function PlanBadgePage() {
         </p>
       </header>
 
+      {/* ── Global error banner ──────────────────────────────────────── */}
+      {error && (
+        <section
+          role="alert"
+          aria-live="polite"
+          style={{
+            marginBottom: "24px",
+            padding: "12px 16px",
+            borderRadius: "10px",
+            background: "var(--danger-bg, #fef2f2)",
+            border: "1px solid var(--danger-border, #fca5a5)",
+            color: "var(--danger-text, #991b1b)",
+            fontSize: "0.875rem",
+            lineHeight: 1.5,
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+          }}
+        >
+          <span aria-hidden="true" style={{ fontSize: "1.125rem" }}>
+            &#9888;
+          </span>
+          <span>{error}</span>
+          <button
+            type="button"
+            aria-label="Dismiss error"
+            onClick={() => setError(null)}
+            style={{
+              marginLeft: "auto",
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              color: "inherit",
+              fontSize: "1rem",
+              lineHeight: 1,
+              padding: "2px 6px",
+              borderRadius: "4px",
+            }}
+          >
+            &times;
+          </button>
+        </section>
+      )}
+
       {/* ── Main content ─────────────────────────────────────────────── */}
-      {selectedTier === null ? (
+      {!showTierPicker && selectedTier === null ? (
         /*
-         * Empty state — no plan is attached yet.
-         * Uses the new "plan-badge" EmptyState variant (issue #529) which
+         * Empty state — no plan is attached yet and the tier picker has
+         * not been opened.
+         *
+         * Uses the "plan-badge" EmptyState variant (issue #529) which
          * renders a medal-and-ribbon line-art illustration themed with the
          * design-token accent colour.
          */
@@ -135,29 +259,56 @@ export default function PlanBadgePage() {
         </section>
       ) : (
         /*
-         * Plan selected — show the badge preview alongside a tier picker so
-         * developers can change their mind without leaving the page.
-         * This branch will be reached once real plan data is wired in.
+         * Plan picker / badge preview — shown after the user clicks
+         * "Choose a plan" or after a tier has been selected.
+         *
+         * Uses optimistic UI: the badge updates immediately on selection
+         * before the async save completes, and reverts on failure.
+         *
+         * Once a tier is saved successfully the badge preview persists
+         * and the picker remains available for changing the tier.
          */
         <section
           className="surface"
           style={{ borderRadius: "16px", padding: "32px" }}
           aria-label="Plan badge preview"
         >
-          {/* Live badge preview */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "12px",
-              marginBottom: "28px",
-            }}
-          >
-            <span style={{ color: "var(--muted)", fontSize: "0.9375rem" }}>
-              Current plan:
-            </span>
-            <PlanBadgeComponent tier={selectedTier} />
-          </div>
+          {/* Live badge preview (only when a tier has been selected) */}
+          {selectedTier !== null && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "12px",
+                marginBottom: "28px",
+              }}
+            >
+              <span style={{ color: "var(--muted)", fontSize: "0.9375rem" }}>
+                Current plan:
+              </span>
+              <PlanBadgeComponent tier={selectedTier} />
+              {saving && (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  aria-label="Saving plan selection"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    fontSize: "0.75rem",
+                    color: "var(--muted)",
+                  }}
+                >
+                  <span
+                    aria-hidden="true"
+                    className="button-spinner"
+                  />
+                  Saving…
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Tier picker */}
           <fieldset
@@ -175,7 +326,9 @@ export default function PlanBadgePage() {
                 marginBottom: "16px",
               }}
             >
-              Change plan tier
+              {selectedTier === null
+                ? "Choose a plan tier"
+                : "Change plan tier"}
             </legend>
 
             <div
@@ -196,7 +349,9 @@ export default function PlanBadgePage() {
                     gap: "8px",
                     padding: "10px 16px",
                     borderRadius: "10px",
-                    border: `1.5px solid ${selectedTier === tier ? "var(--accent)" : "var(--line)"}`,
+                    border: `1.5px solid ${
+                      selectedTier === tier ? "var(--accent)" : "var(--line)"
+                    }`,
                     background:
                       selectedTier === tier
                         ? "var(--surface-soft)"
@@ -204,16 +359,20 @@ export default function PlanBadgePage() {
                     cursor: "pointer",
                     fontSize: "0.9375rem",
                     color: "var(--text)",
-                    transition: "border-color 120ms ease, background 120ms ease",
+                    transition:
+                      "border-color 120ms ease, background 120ms ease",
+                    opacity: saving ? 0.6 : 1,
                   }}
                 >
                   <input
                     type="radio"
                     name="plan-tier"
                     value={tier}
-                    defaultChecked={selectedTier === tier}
+                    checked={selectedTier === tier}
+                    onChange={() => handleTierChange(tier)}
                     aria-label={`${TIER_LABELS[tier]} plan`}
                     style={{ accentColor: "var(--accent)" }}
+                    disabled={saving}
                   />
                   {TIER_LABELS[tier]}
                 </label>
